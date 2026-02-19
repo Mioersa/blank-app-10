@@ -4,15 +4,14 @@ import numpy as np
 from datetime import datetime
 import altair as alt
 
-# ---------------- CONFIG ----------------
+# ============ CONFIG ============
 st.set_page_config("Rule‑Based Intraday Option Signals", layout="wide")
 st.title("📊 Rule‑Based Intraday Option Signal System")
 
 # ---- SIDEBAR ----
 rolling_n = st.sidebar.number_input("Rolling window (bars)", 3, 60, 5)
 spread_cutoff = st.sidebar.slider("Max bid‑ask spread %", 0.0, 1.0, 0.2)
-basis = st.sidebar.radio("Select basis for Top‑Strike ranking",
-                         ["Open Interest","Volume"])
+basis = st.sidebar.radio("Top‑strike ranking basis", ["Open Interest", "Volume"])
 num_strikes = st.sidebar.number_input("Top strikes by basis", 1, 30, 6)
 st.sidebar.markdown("Upload one or more **Option‑Chain CSV files** below 👇")
 
@@ -33,6 +32,7 @@ for f in uploaded_files:
     df=pd.read_csv(f)
     df["timestamp"]=ts
     frames.append(df)
+
 raw_df=pd.concat(frames,ignore_index=True).sort_values("timestamp")
 st.success(f"✅ Loaded {len(uploaded_files)} file(s), {len(raw_df)} rows.")
 
@@ -60,19 +60,18 @@ def clean_data(df,spread_cutoff=0.2):
 
 df=clean_data(raw_df,spread_cutoff)
 
-# ---- FEATURES ----
+# ---- FEATURE BUILD ----
 def compute_features(df,rolling_n=5,top_n=6,basis="Open Interest"):
     df=df.copy().sort_values("timestamp")
-    # incremental volume
     df["CE_vol_delta"]=df.groupby("CE_strikePrice")["CE_totalTradedVolume"].diff().fillna(0)
     df["PE_vol_delta"]=df.groupby("CE_strikePrice")["PE_totalTradedVolume"].diff().fillna(0)
     df["total_vol"]=df["CE_vol_delta"]+df["PE_vol_delta"]
     df["total_OI"]=df["CE_openInterest"]+df["PE_openInterest"]
 
     metric="total_OI" if basis.startswith("Open") else "total_vol"
-    mean_by_strike=df.groupby("CE_strikePrice")[metric].mean()
-    top_strikes=mean_by_strike.nlargest(top_n)
-    covered_pct=round(100*top_strikes.sum()/mean_by_strike.sum(),2)
+    mean_strike=df.groupby("CE_strikePrice")[metric].mean()
+    top_strikes=mean_strike.nlargest(top_n)
+    covered=round(100*top_strikes.sum()/mean_strike.sum(),2)
     df=df[df["CE_strikePrice"].isin(top_strikes.index)]
 
     agg=df.groupby("timestamp").agg({
@@ -93,7 +92,7 @@ def compute_features(df,rolling_n=5,top_n=6,basis="Open Interest"):
     total_vol=agg["CE_vol_delta"]+agg["PE_vol_delta"]
     agg["Volume_spike"]=total_vol/total_vol.rolling(rolling_n).mean()
     agg.fillna(0,inplace=True)
-    return agg,covered_pct
+    return agg,covered
 
 df_feat,covered_pct=compute_features(df,rolling_n,num_strikes,basis)
 st.caption(f"**Top {num_strikes} strikes** cover ≈ {covered_pct}% of total {basis.lower()}.")
@@ -124,38 +123,38 @@ df_feat["signal_numeric"]=df_feat["signal"].map({
     "SELL_STRANGLE":0,"HOLD":0,"EXIT_POSITION":-1
 }).fillna(0)
 
-# ---- COLOR STYLE ----
-def color_signal(val):
-    colors={"BUY_CALL":"background:#99ff99;","BUY_PUT":"background:#33cc33; color:white;",
-            "SELL_STRANGLE":"background:#ffcc80;","MOMENTUM_TRADE":"background:#00b300; color:white;",
-            "EXIT_POSITION":"background:#ff4d4d; color:white;","HOLD":"background:#ffd280;"}
-    return colors.get(val,"")
-def color_bias(val):
-    if val=="bullish": return "background:#b3ffb3;"
-    if val=="bearish": return "background:#ff9999;"
-    return "background:#ffd480;"
-def styled(df):
-    return df.style.applymap(color_signal,subset=["signal"]).applymap(color_bias,subset=["bias"])
+# ---- STYLERS ----
+def _sig_color(v):
+    colors={"BUY_CALL":"#99ff99","BUY_PUT":"#33cc33","SELL_STRANGLE":"#ffcc80",
+            "MOMENTUM_TRADE":"#00b300","EXIT_POSITION":"#ff4d4d","HOLD":"#ffd280"}
+    return f"background-color:{colors.get(v,'')}"
+def _bias_color(v):
+    if v=="bullish": return "background-color:#b3ffb3"
+    if v=="bearish": return "background-color:#ff9999"
+    return "background-color:#ffd480"
 
 # ---- METRICS ----
-latest=df_feat.iloc[-1]
-col1,col2,col3,col4=st.columns(4)
-col1.metric("Current PCR (OI)",round(float(latest["PCR_OI"]),2))
-col2.metric("# Trend Bars",int((df_feat["regime"]=="trend").sum()))
-col3.metric("Latest Signal",latest["signal"])
-col4.metric("Rows Processed",len(df_feat))
-
-def pcr_text(p):
-    if p<0.7:return"🐂 Bullish – calls dominate."
-    if 0.7<=p<=1.2:return"🟧 Neutral structure."
-    return"🐻 Bearish – puts build up."
-st.caption(f"**PCR Interpretation:** {pcr_text(latest['PCR_OI'])}")
+lat=df_feat.iloc[-1]
+c1,c2,c3,c4=st.columns(4)
+c1.metric("Current PCR (OI)",round(float(lat["PCR_OI"]),2))
+c2.metric("# Trend Bars",int((df_feat["regime"]=="trend").sum()))
+c3.metric("Latest Signal",lat["signal"])
+c4.metric("Rows Processed",len(df_feat))
+def pcr_meaning(p):
+    if p<0.7:return"🐂 Bullish – calls lead"
+    if 0.7<=p<=1.2:return"🟧 Neutral structure"
+    return"🐻 Bearish – puts build"
+st.caption(f"**PCR Interpretation:** {pcr_meaning(lat['PCR_OI'])}")
 
 # ---- TABLES ----
 st.subheader("🧾 Recent Signals")
-st.dataframe(styled(df_feat.tail(10)),use_container_width=True)
+st.dataframe(df_feat.tail(10).style.applymap(_sig_color,subset=["signal"])
+                              .applymap(_bias_color,subset=["bias"]),
+             use_container_width=True)
 st.subheader("📄 Full Dataset")
-st.dataframe(styled(df_feat),use_container_width=True)
+st.dataframe(df_feat.style.applymap(_sig_color,subset=["signal"])
+                          .applymap(_bias_color,subset=["bias"]),
+             use_container_width=True)
 
 # ---- TIMELINE ----
 st.subheader("🌀 Signal / Bias Timeline")
@@ -163,36 +162,37 @@ sig_chart=alt.Chart(df_feat.reset_index()).mark_circle(size=80).encode(
     x="timestamp:T",
     y=alt.Y("signal_numeric:Q",scale=alt.Scale(domain=[-1.2,1.2]),
             title="Signal (‑1 = Sell, 0 = Hold, +1 = Buy)"),
-    color="bias:N",tooltip=["timestamp","signal","bias","regime"])
+    color="bias:N",
+    tooltip=["timestamp","signal","bias","regime"])
 st.altair_chart(sig_chart,use_container_width=True)
 
-# ---- DEEP PRICE–VOLUME CORRELATION ----
+# ---- DEEP PRICE–VOLUME CORRELATION ----
 st.subheader("📊 Deep Price–Volume Correlation Analysis")
-top_n_vol=st.slider("Select Top Strikes by Avg Volume",1,20,5)
-# use cleaned base df which has volume deltas
-df_vol=df.copy()
-df_vol["total_vol"]=df_vol.groupby("CE_strikePrice")[["CE_totalTradedVolume","PE_totalTradedVolume"]].diff().sum(axis=1).fillna(0)
-vol_means=df_vol.groupby("CE_strikePrice")["total_vol"].mean().nlargest(top_n_vol)
-sel_strikes=vol_means.index
-subset=df_vol[df_vol["CE_strikePrice"].isin(sel_strikes)]
-
+top_vol = st.slider("Select Top Strikes by Avg Volume", 1, 20, 5)
+df["total_vol"]=df.groupby("CE_strikePrice")[["CE_totalTradedVolume","PE_totalTradedVolume"]].diff().sum(axis=1).fillna(0)
+avg_vol=df.groupby("CE_strikePrice")["total_vol"].mean().nlargest(top_vol)
+sel=avg_vol.index
+subset=df[df["CE_strikePrice"].isin(sel)]
 corrs=[]
 for k,g in subset.groupby("CE_strikePrice"):
-    corr=np.corrcoef(g["total_vol"], g["CE_lastPrice"].diff())[0,1]
-    corrs.append({"strike":k,"corr":round(corr,2)})
-corr_df=pd.DataFrame(corrs).dropna()
-st.write("Correlation (+1 = volume confirms price rise, ‑1 = divergence):")
-st.dataframe(corr_df)
-
-corr_chart=alt.Chart(corr_df).mark_bar().encode(
-    x="strike:O",y="corr:Q",
-    color=alt.condition("datum.corr>0",
-                        alt.value("#2ECC71"),alt.value("#E74C3C"))
-).properties(height=300)
-st.altair_chart(corr_chart,use_container_width=True)
+    if g["total_vol"].std()>0 and g["CE_lastPrice"].diff().std()>0:
+        c=np.corrcoef(g["total_vol"],g["CE_lastPrice"].diff())[0,1]
+        corrs.append({"strike":k,"corr":round(c,2)})
+corr_df=pd.DataFrame(corrs)
+if corrs:
+    st.dataframe(corr_df,use_container_width=True)
+    corr_chart=alt.Chart(corr_df).mark_bar().encode(
+        x="strike:O",y="corr:Q",
+        color=alt.condition("datum.corr>0",
+                            alt.value("#2ECC71"),alt.value("#E74C3C"))
+    ).properties(height=300)
+    st.altair_chart(corr_chart,use_container_width=True)
+else:
+    st.info("No valid correlations computed (check uploaded data time series).")
 
 # ---- DOWNLOAD ----
-st.download_button("⬇️ Download Processed Results",
-                   data=df_feat.to_csv(index=False).encode("utf‑8"),
-                   file_name="signals_output.csv",
-                   mime="text/csv")
+st.download_button("⬇️ Download Processed CSV",
+                   df_feat.to_csv(index=False).encode("utf‑8"),
+                   "signals_output.csv","text/csv")
+
+
