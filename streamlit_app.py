@@ -63,7 +63,6 @@ df=clean_data(raw,spread_cutoff)
 # ---- FEATURES ----
 def compute_features(df,rolling_n=5,top_n=6,basis="Open Interest"):
     df=df.copy().sort_values("timestamp")
-    # ΔVol = current cumulative vol - prev cumulative vol
     df["CE_vol_delta"]=df.groupby("CE_strikePrice")["CE_totalTradedVolume"].diff().fillna(0)
     df["PE_vol_delta"]=df.groupby("CE_strikePrice")["PE_totalTradedVolume"].diff().fillna(0)
     df["total_vol"]=df["CE_vol_delta"]+df["PE_vol_delta"]
@@ -152,12 +151,10 @@ st.subheader("🧾 Recent Signals")
 st.dataframe(df_feat.tail(10).style.applymap(sig_color,subset=["signal"])
                               .applymap(bias_color,subset=["bias"]),
              use_container_width=True)
-
 st.subheader("📄 Full Dataset")
 st.dataframe(df_feat.style.applymap(sig_color,subset=["signal"])
                           .applymap(bias_color,subset=["bias"]),
              use_container_width=True)
-
 st.subheader("🌀 Signal / Bias Timeline")
 sig_chart=alt.Chart(df_feat.reset_index()).mark_circle(size=80).encode(
     x="timestamp:T",
@@ -166,45 +163,46 @@ sig_chart=alt.Chart(df_feat.reset_index()).mark_circle(size=80).encode(
     color="bias:N",tooltip=["timestamp","signal","bias","regime"])
 st.altair_chart(sig_chart,use_container_width=True)
 
-# ---- DEEP PRICE–VOLUME CORRELATION (Per‑Strike + Correct Δ)
-st.subheader("📊 Deep Price–Volume Correlation (Per Strike + CE/PE + Rolling)")
+# ---- explicit rolling correlation helper ----
+def rolling_corr(a, b, window=10, minp=3):
+    arr = np.full(len(a), np.nan)
+    for i in range(window, len(a)):
+        xa, xb = a[i-window:i], b[i-window:i]
+        if np.std(xa)>1e-8 and np.std(xb)>1e-8:
+            arr[i] = np.corrcoef(xa, xb)[0,1]
+    return pd.Series(arr).fillna(method="bfill").fillna(0)
+
+# ---- DEEP PRICE–VOLUME CORRELATION ----
+st.subheader("📊 Deep Price–Volume Correlation (Per Strike + Spike Detection + Rolling)")
 
 top_vol = st.slider("Select Top Strikes by Avg Volume", 1, 20, 5)
-
 avg_vol = df.groupby("CE_strikePrice")[["CE_totalTradedVolume","PE_totalTradedVolume"]].mean().sum(axis=1)
 top_strikes = avg_vol.nlargest(top_vol).index
-
 tabs = st.tabs([f"Strike {int(s)}" for s in top_strikes])
 
 for tab, strike in zip(tabs, top_strikes):
-    tab.write(f"### Strike {int(strike)}")
+    tab.write(f"### Strike {int(strike)}")
 
     for leg, color in zip(["CE","PE"], ["#c1f7c1","#f7c1c1"]):
-
         g = df[df["CE_strikePrice"]==strike].copy().sort_values("timestamp")
 
-        # correct Δ computation: current - previous
+        # ΔPrice / ΔVol = current - previous
         g[f"{leg}_ΔPrice"] = g[f"{leg}_lastPrice"].diff()
         g[f"{leg}_ΔVol"]   = g[f"{leg}_totalTradedVolume"].diff()
 
-        # correlation
-        corr = np.nan
-        if g[f"{leg}_ΔVol"].std()>0 and g[f"{leg}_ΔPrice"].std()>0:
-            corr = np.corrcoef(g[f"{leg}_ΔVol"], g[f"{leg}_ΔPrice"])[0,1]
-        g["Correlation"] = round(float(corr),3) if not np.isnan(corr) else 0.0
+        # normalize for stable correlation
+        g[f"{leg}_ΔPriceN"]=(g[f"{leg}_ΔPrice"]-g[f"{leg}_ΔPrice"].mean())/(g[f"{leg}_ΔPrice"].std()+1e-9)
+        g[f"{leg}_ΔVolN"]  =(g[f"{leg}_ΔVol"]-g[f"{leg}_ΔVol"].mean())/(g[f"{leg}_ΔVol"].std()+1e-9)
 
-        # rolling correlation (10‑bar)
-        rollcorr = (
-            g[[f"{leg}_ΔVol", f"{leg}_ΔPrice"]]
-            .rolling(10, min_periods=3)
-            .corr().unstack().iloc[:,1].rename("RollingCorr")
-        )
-        g=g.join(rollcorr).fillna(0)
+        g["Correlation"]=rolling_corr(g[f"{leg}_ΔVolN"].values,g[f"{leg}_ΔPriceN"].values,window=len(g))
+        g["RollingCorr"]=rolling_corr(g[f"{leg}_ΔVolN"].values,g[f"{leg}_ΔPriceN"].values,window=10)
 
-        cols = ["timestamp", f"{leg}_lastPrice", f"{leg}_totalTradedVolume",
-                 f"{leg}_ΔPrice", f"{leg}_ΔVol", "Correlation", "RollingCorr"]
+        # spike detection 5-bar mean ratio
+        g[f"{leg}_VolSpike"] = g[f"{leg}_ΔVol"].abs() / (g[f"{leg}_ΔVol"].abs().rolling(5).mean() + 1e-6)
 
-        tab.markdown(f"**{leg} Correlation:** {g['Correlation'].iloc[-1]:.3f}")
+        cols=["timestamp",f"{leg}_lastPrice",f"{leg}_totalTradedVolume",f"{leg}_ΔPrice",
+              f"{leg}_ΔVol","RollingCorr",f"{leg}_VolSpike"]
+        tab.markdown(f"**{leg} Latest 10‑bar Corr:** {g['RollingCorr'].iloc[-1]:.3f}")
         tab.dataframe(
             g[cols].rename(columns={
                 "timestamp":"Timestamp",
@@ -212,18 +210,25 @@ for tab, strike in zip(tabs, top_strikes):
                 f"{leg}_totalTradedVolume":"Volume",
                 f"{leg}_ΔPrice":"Δ Price",
                 f"{leg}_ΔVol":"Δ Volume",
-                "RollingCorr":"10‑bar Corr"
-            }).style.highlight_max(subset=["Δ Price","Δ Volume"], color=color),
+                "RollingCorr":"10‑bar Corr",
+                f"{leg}_VolSpike":"Vol Spike ×"
+            }).style.highlight_max(subset=["Δ Price","Δ Volume","Vol Spike ×"], color=color),
             use_container_width=True
         )
 
-        # rolling correlation mini‑chart
-        chart = alt.Chart(g).mark_line(color=color).encode(
-            x="timestamp:T", y="RollingCorr:Q", tooltip=["timestamp","RollingCorr"]
-        ).properties(height=100)
-        tab.altair_chart(chart, use_container_width=True)
+        # correlation line
+        corr_chart = alt.Chart(g).mark_line(color=color).encode(
+            x="timestamp:T", y="RollingCorr:Q"
+        )
+        # red dots for volume spikes > 2× mean
+        spike_pts = alt.Chart(g[g[f"{leg}_VolSpike"]>2]).mark_point(color="red",size=60).encode(
+            x="timestamp:T", y="RollingCorr:Q"
+        )
+        tab.altair_chart(corr_chart + spike_pts, use_container_width=True)
 
 # ---- DOWNLOAD ----
 st.download_button("⬇️ Download Processed CSV",
                    df_feat.to_csv(index=False).encode("utf‑8"),
                    "signals_output.csv","text/csv")
+
+
