@@ -63,6 +63,7 @@ df=clean_data(raw,spread_cutoff)
 # ---- FEATURES ----
 def compute_features(df,rolling_n=5,top_n=6,basis="Open Interest"):
     df=df.copy().sort_values("timestamp")
+    # ΔVol = current cumulative vol - prev cumulative vol
     df["CE_vol_delta"]=df.groupby("CE_strikePrice")["CE_totalTradedVolume"].diff().fillna(0)
     df["PE_vol_delta"]=df.groupby("CE_strikePrice")["PE_totalTradedVolume"].diff().fillna(0)
     df["total_vol"]=df["CE_vol_delta"]+df["PE_vol_delta"]
@@ -165,16 +166,12 @@ sig_chart=alt.Chart(df_feat.reset_index()).mark_circle(size=80).encode(
     color="bias:N",tooltip=["timestamp","signal","bias","regime"])
 st.altair_chart(sig_chart,use_container_width=True)
 
-# ---- DEEP PRICE–VOLUME CORRELATION (Per Strike + Rolling)
-st.subheader("📊 Deep Price–Volume Correlation (Per Strike + CE/PE + Rolling)")
+# ---- DEEP PRICE–VOLUME CORRELATION (Per‑Strike + Correct Δ)
+st.subheader("📊 Deep Price–Volume Correlation (Per Strike + CE/PE + Rolling)")
 
 top_vol = st.slider("Select Top Strikes by Avg Volume", 1, 20, 5)
 
-# calculate deltas per leg
-for leg in ["CE","PE"]:
-    df[f"{leg}_vol_delta"] = df.groupby("CE_strikePrice")[f"{leg}_totalTradedVolume"].diff().fillna(0)
-
-avg_vol = df.groupby("CE_strikePrice")[["CE_vol_delta","PE_vol_delta"]].sum().sum(axis=1)
+avg_vol = df.groupby("CE_strikePrice")[["CE_totalTradedVolume","PE_totalTradedVolume"]].mean().sum(axis=1)
 top_strikes = avg_vol.nlargest(top_vol).index
 
 tabs = st.tabs([f"Strike {int(s)}" for s in top_strikes])
@@ -183,17 +180,20 @@ for tab, strike in zip(tabs, top_strikes):
     tab.write(f"### Strike {int(strike)}")
 
     for leg, color in zip(["CE","PE"], ["#c1f7c1","#f7c1c1"]):
-        g = df[df["CE_strikePrice"]==strike].copy()
-        g[f"{leg}_ΔPrice"] = g[f"{leg}_lastPrice"].diff().fillna(0)
-        g[f"{leg}_ΔVol"]   = g[f"{leg}_vol_delta"].diff().fillna(0)
 
-        # point correlation
+        g = df[df["CE_strikePrice"]==strike].copy().sort_values("timestamp")
+
+        # correct Δ computation: current - previous
+        g[f"{leg}_ΔPrice"] = g[f"{leg}_lastPrice"].diff()
+        g[f"{leg}_ΔVol"]   = g[f"{leg}_totalTradedVolume"].diff()
+
+        # correlation
         corr = np.nan
         if g[f"{leg}_ΔVol"].std()>0 and g[f"{leg}_ΔPrice"].std()>0:
             corr = np.corrcoef(g[f"{leg}_ΔVol"], g[f"{leg}_ΔPrice"])[0,1]
         g["Correlation"] = round(float(corr),3) if not np.isnan(corr) else 0.0
 
-        # rolling correlation
+        # rolling correlation (10‑bar)
         rollcorr = (
             g[[f"{leg}_ΔVol", f"{leg}_ΔPrice"]]
             .rolling(10, min_periods=3)
@@ -217,7 +217,7 @@ for tab, strike in zip(tabs, top_strikes):
             use_container_width=True
         )
 
-        # mini chart of rolling correlation
+        # rolling correlation mini‑chart
         chart = alt.Chart(g).mark_line(color=color).encode(
             x="timestamp:T", y="RollingCorr:Q", tooltip=["timestamp","RollingCorr"]
         ).properties(height=100)
