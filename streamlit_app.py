@@ -4,7 +4,7 @@ import numpy as np
 from datetime import datetime
 import altair as alt
 
-# ============ CONFIG ============
+# ======================================
 st.set_page_config("Rule‑Based Intraday Option Signals", layout="wide")
 st.title("📊 Rule‑Based Intraday Option Signal System")
 
@@ -71,7 +71,7 @@ def compute_features(df,rolling_n=5,top_n=6,basis="Open Interest"):
     metric="total_OI" if basis.startswith("Open") else "total_vol"
     mean_strike=df.groupby("CE_strikePrice")[metric].mean()
     top_strikes=mean_strike.nlargest(top_n)
-    covered=round(100*top_strikes.sum()/mean_strike.sum(),2)
+    covered_pct=round(100*top_strikes.sum()/mean_strike.sum(),2)
     df=df[df["CE_strikePrice"].isin(top_strikes.index)]
 
     agg=df.groupby("timestamp").agg({
@@ -92,7 +92,7 @@ def compute_features(df,rolling_n=5,top_n=6,basis="Open Interest"):
     total_vol=agg["CE_vol_delta"]+agg["PE_vol_delta"]
     agg["Volume_spike"]=total_vol/total_vol.rolling(rolling_n).mean()
     agg.fillna(0,inplace=True)
-    return agg,covered
+    return agg,covered_pct
 
 df_feat,covered_pct=compute_features(df,rolling_n,num_strikes,basis)
 st.caption(f"**Top {num_strikes} strikes** cover ≈ {covered_pct}% of total {basis.lower()}.")
@@ -124,11 +124,11 @@ df_feat["signal_numeric"]=df_feat["signal"].map({
 }).fillna(0)
 
 # ---- STYLERS ----
-def _sig_color(v):
-    colors={"BUY_CALL":"#99ff99","BUY_PUT":"#33cc33","SELL_STRANGLE":"#ffcc80",
-            "MOMENTUM_TRADE":"#00b300","EXIT_POSITION":"#ff4d4d","HOLD":"#ffd280"}
-    return f"background-color:{colors.get(v,'')}"
-def _bias_color(v):
+def sig_color(v):
+    c={"BUY_CALL":"#99ff99","BUY_PUT":"#33cc33","SELL_STRANGLE":"#ffcc80",
+       "MOMENTUM_TRADE":"#00b300","EXIT_POSITION":"#ff4d4d","HOLD":"#ffd280"}
+    return f"background-color:{c.get(v,'')}"
+def bias_color(v):
     if v=="bullish": return "background-color:#b3ffb3"
     if v=="bearish": return "background-color:#ff9999"
     return "background-color:#ffd480"
@@ -140,20 +140,20 @@ c1.metric("Current PCR (OI)",round(float(lat["PCR_OI"]),2))
 c2.metric("# Trend Bars",int((df_feat["regime"]=="trend").sum()))
 c3.metric("Latest Signal",lat["signal"])
 c4.metric("Rows Processed",len(df_feat))
-def pcr_meaning(p):
+def pcr_text(p):
     if p<0.7:return"🐂 Bullish – calls lead"
     if 0.7<=p<=1.2:return"🟧 Neutral structure"
     return"🐻 Bearish – puts build"
-st.caption(f"**PCR Interpretation:** {pcr_meaning(lat['PCR_OI'])}")
+st.caption(f"**PCR Interpretation:** {pcr_text(lat['PCR_OI'])}")
 
 # ---- TABLES ----
 st.subheader("🧾 Recent Signals")
-st.dataframe(df_feat.tail(10).style.applymap(_sig_color,subset=["signal"])
-                              .applymap(_bias_color,subset=["bias"]),
+st.dataframe(df_feat.tail(10).style.applymap(sig_color,subset=["signal"])
+                              .applymap(bias_color,subset=["bias"]),
              use_container_width=True)
 st.subheader("📄 Full Dataset")
-st.dataframe(df_feat.style.applymap(_sig_color,subset=["signal"])
-                          .applymap(_bias_color,subset=["bias"]),
+st.dataframe(df_feat.style.applymap(sig_color,subset=["signal"])
+                          .applymap(bias_color,subset=["bias"]),
              use_container_width=True)
 
 # ---- TIMELINE ----
@@ -169,30 +169,31 @@ st.altair_chart(sig_chart,use_container_width=True)
 # ---- DEEP PRICE–VOLUME CORRELATION ----
 st.subheader("📊 Deep Price–Volume Correlation Analysis")
 top_vol = st.slider("Select Top Strikes by Avg Volume", 1, 20, 5)
+
+# calc per‑bar volume delta
 df["total_vol"]=df.groupby("CE_strikePrice")[["CE_totalTradedVolume","PE_totalTradedVolume"]].diff().sum(axis=1).fillna(0)
 avg_vol=df.groupby("CE_strikePrice")["total_vol"].mean().nlargest(top_vol)
 sel=avg_vol.index
-subset=df[df["CE_strikePrice"].isin(sel)]
-corrs=[]
+subset=df[df["CE_strikePrice"].isin(sel)].copy()
+
+corr_map={}
 for k,g in subset.groupby("CE_strikePrice"):
     if g["total_vol"].std()>0 and g["CE_lastPrice"].diff().std()>0:
         c=np.corrcoef(g["total_vol"],g["CE_lastPrice"].diff())[0,1]
-        corrs.append({"strike":k,"corr":round(c,2)})
-corr_df=pd.DataFrame(corrs)
-if corrs:
-    st.dataframe(corr_df,use_container_width=True)
-    corr_chart=alt.Chart(corr_df).mark_bar().encode(
-        x="strike:O",y="corr:Q",
-        color=alt.condition("datum.corr>0",
-                            alt.value("#2ECC71"),alt.value("#E74C3C"))
-    ).properties(height=300)
-    st.altair_chart(corr_chart,use_container_width=True)
-else:
-    st.info("No valid correlations computed (check uploaded data time series).")
+        corr_map[k]=round(c,3)
+
+subset["ΔPrice"]=subset.groupby("CE_strikePrice")["CE_lastPrice"].diff().fillna(0)
+subset["ΔVol"]=subset.groupby("CE_strikePrice")["total_vol"].diff().fillna(0)
+subset["corr"] = subset["CE_strikePrice"].map(corr_map)
+
+show_cols=["CE_strikePrice","timestamp","CE_lastPrice","total_vol","ΔPrice","ΔVol","corr"]
+subset_display=subset[show_cols].rename(columns={
+    "CE_strikePrice":"Strike","CE_lastPrice":"Price",
+    "total_vol":"Volume","ΔPrice":"Δ Price","ΔVol":"Δ Volume","corr":"Correlation"
+})
+st.dataframe(subset_display,use_container_width=True)
 
 # ---- DOWNLOAD ----
 st.download_button("⬇️ Download Processed CSV",
                    df_feat.to_csv(index=False).encode("utf‑8"),
                    "signals_output.csv","text/csv")
-
-
