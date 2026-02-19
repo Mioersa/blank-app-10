@@ -151,6 +151,7 @@ st.subheader("🧾 Recent Signals")
 st.dataframe(df_feat.tail(10).style.applymap(sig_color,subset=["signal"])
                               .applymap(bias_color,subset=["bias"]),
              use_container_width=True)
+
 st.subheader("📄 Full Dataset")
 st.dataframe(df_feat.style.applymap(sig_color,subset=["signal"])
                           .applymap(bias_color,subset=["bias"]),
@@ -164,30 +165,63 @@ sig_chart=alt.Chart(df_feat.reset_index()).mark_circle(size=80).encode(
     color="bias:N",tooltip=["timestamp","signal","bias","regime"])
 st.altair_chart(sig_chart,use_container_width=True)
 
-# ---- DEEP PRICE–VOLUME CORRELATION ----
-st.subheader("📊 Deep Price–Volume Correlation (Per Strike)")
-top_vol = st.slider("Select Top Strikes by Avg Volume",1,20,5)
-df["total_vol"]=df.groupby("CE_strikePrice")[["CE_totalTradedVolume","PE_totalTradedVolume"]].diff().sum(axis=1).fillna(0)
-avg_vol=df.groupby("CE_strikePrice")["total_vol"].mean().nlargest(top_vol)
-sel_strikes=avg_vol.index.tolist()
-subset=df[df["CE_strikePrice"].isin(sel_strikes)].copy()
+# ---- DEEP PRICE–VOLUME CORRELATION (Per Strike + Rolling)
+st.subheader("📊 Deep Price–Volume Correlation (Per Strike + CE/PE + Rolling)")
 
-# ---- make tabs per strike ----
-tabs=st.tabs([f"Strike {int(s)}" for s in sel_strikes])
-for tab, strike in zip(tabs, sel_strikes):
-    g=subset[subset["CE_strikePrice"]==strike].copy()
-    g["ΔPrice"]=g["CE_lastPrice"].diff().fillna(0)
-    g["ΔVol"]=g["total_vol"].diff().fillna(0)
-    corr=np.nan
-    if g["total_vol"].std()>0 and g["ΔPrice"].std()>0:
-        corr=np.corrcoef(g["total_vol"],g["ΔPrice"])[0,1]
-    g["Correlation"]=round(float(corr),3) if not np.isnan(corr) else 0.0
-    cols_show=["timestamp","CE_lastPrice","total_vol","ΔPrice","ΔVol","Correlation"]
-    tab.write(f"**Strike {int(strike)} – Correlation:** {g['Correlation'].iloc[-1]:.3f}")
-    tab.dataframe(g[cols_show].rename(columns={
-        "timestamp":"Timestamp","CE_lastPrice":"Price","total_vol":"Volume",
-        "ΔPrice":"Δ Price","ΔVol":"Δ Volume"
-    }),use_container_width=True)
+top_vol = st.slider("Select Top Strikes by Avg Volume", 1, 20, 5)
+
+# calculate deltas per leg
+for leg in ["CE","PE"]:
+    df[f"{leg}_vol_delta"] = df.groupby("CE_strikePrice")[f"{leg}_totalTradedVolume"].diff().fillna(0)
+
+avg_vol = df.groupby("CE_strikePrice")[["CE_vol_delta","PE_vol_delta"]].sum().sum(axis=1)
+top_strikes = avg_vol.nlargest(top_vol).index
+
+tabs = st.tabs([f"Strike {int(s)}" for s in top_strikes])
+
+for tab, strike in zip(tabs, top_strikes):
+    tab.write(f"### Strike {int(strike)}")
+
+    for leg, color in zip(["CE","PE"], ["#c1f7c1","#f7c1c1"]):
+        g = df[df["CE_strikePrice"]==strike].copy()
+        g[f"{leg}_ΔPrice"] = g[f"{leg}_lastPrice"].diff().fillna(0)
+        g[f"{leg}_ΔVol"]   = g[f"{leg}_vol_delta"].diff().fillna(0)
+
+        # point correlation
+        corr = np.nan
+        if g[f"{leg}_ΔVol"].std()>0 and g[f"{leg}_ΔPrice"].std()>0:
+            corr = np.corrcoef(g[f"{leg}_ΔVol"], g[f"{leg}_ΔPrice"])[0,1]
+        g["Correlation"] = round(float(corr),3) if not np.isnan(corr) else 0.0
+
+        # rolling correlation
+        rollcorr = (
+            g[[f"{leg}_ΔVol", f"{leg}_ΔPrice"]]
+            .rolling(10, min_periods=3)
+            .corr().unstack().iloc[:,1].rename("RollingCorr")
+        )
+        g=g.join(rollcorr).fillna(0)
+
+        cols = ["timestamp", f"{leg}_lastPrice", f"{leg}_totalTradedVolume",
+                 f"{leg}_ΔPrice", f"{leg}_ΔVol", "Correlation", "RollingCorr"]
+
+        tab.markdown(f"**{leg} Correlation:** {g['Correlation'].iloc[-1]:.3f}")
+        tab.dataframe(
+            g[cols].rename(columns={
+                "timestamp":"Timestamp",
+                f"{leg}_lastPrice":"Price",
+                f"{leg}_totalTradedVolume":"Volume",
+                f"{leg}_ΔPrice":"Δ Price",
+                f"{leg}_ΔVol":"Δ Volume",
+                "RollingCorr":"10‑bar Corr"
+            }).style.highlight_max(subset=["Δ Price","Δ Volume"], color=color),
+            use_container_width=True
+        )
+
+        # mini chart of rolling correlation
+        chart = alt.Chart(g).mark_line(color=color).encode(
+            x="timestamp:T", y="RollingCorr:Q", tooltip=["timestamp","RollingCorr"]
+        ).properties(height=100)
+        tab.altair_chart(chart, use_container_width=True)
 
 # ---- DOWNLOAD ----
 st.download_button("⬇️ Download Processed CSV",
