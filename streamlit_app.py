@@ -13,17 +13,17 @@ rolling_n = st.sidebar.number_input("Rolling window (bars)", 3, 60, 5)
 spread_cutoff = st.sidebar.slider("Max bid‑ask spread %", 0.0, 1.0, 0.2)
 basis = st.sidebar.radio("Top‑strike ranking basis", ["Open Interest", "Volume"])
 num_strikes = st.sidebar.number_input("Top strikes by basis", 1, 30, 6)
-st.sidebar.markdown("Upload one or more **Option‑Chain CSV files** below 👇")
+st.sidebar.markdown("Upload **Option‑Chain CSV files** 👇")
 
-uploaded_files = st.file_uploader("Drop CSV files (multiple allowed)",
-                                  type=["csv"], accept_multiple_files=True)
-if not uploaded_files:
+uploaded = st.file_uploader("Drop CSV files (multiple allowed)",
+                             type=["csv"], accept_multiple_files=True)
+if not uploaded:
     st.info("⬅️ Upload CSVs to start.")
     st.stop()
 
 # ---- LOAD ----
 frames=[]
-for f in uploaded_files:
+for f in uploaded:
     try:
         base=f.name.replace(".csv","")
         ts=datetime.strptime(base.split("_")[-2]+"_"+base.split("_")[-1],"%d%m%Y_%H%M%S")
@@ -33,11 +33,11 @@ for f in uploaded_files:
     df["timestamp"]=ts
     frames.append(df)
 
-raw_df=pd.concat(frames,ignore_index=True).sort_values("timestamp")
-st.success(f"✅ Loaded {len(uploaded_files)} file(s), {len(raw_df)} rows.")
+raw=pd.concat(frames,ignore_index=True).sort_values("timestamp")
+st.success(f"✅ Loaded {len(uploaded)} file(s), {len(raw)} rows.")
 
 # ---- CLEAN ----
-def clean_data(df,spread_cutoff=0.2):
+def clean_data(df,cuto=0.2):
     df=df.copy()
     df["timestamp"]=pd.to_datetime(df["timestamp"],errors="coerce")
     req=["CE_buyPrice1","CE_sellPrice1","PE_buyPrice1","PE_sellPrice1"]
@@ -47,7 +47,7 @@ def clean_data(df,spread_cutoff=0.2):
     df["mid_PE"]=(df["PE_buyPrice1"]+df["PE_sellPrice1"])/2
     df["mid_CE"].replace(0,np.nan,inplace=True)
     df["spread_pct"]=abs(df["CE_sellPrice1"]-df["CE_buyPrice1"])/df["mid_CE"]
-    df=df[df["spread_pct"]<spread_cutoff]
+    df=df[df["spread_pct"]<cuto]
     if "CE_expiryDate" in df.columns:
         df["CE_expiryDate"]=pd.to_datetime(df["CE_expiryDate"],errors="coerce")
         df["days_to_expiry"]=(df["CE_expiryDate"]-df["timestamp"]).dt.days
@@ -58,16 +58,15 @@ def clean_data(df,spread_cutoff=0.2):
     df["θ_adj_PE"]=df["PE_lastPrice"]/np.sqrt(df["days_to_expiry"].clip(lower=1))
     return df
 
-df=clean_data(raw_df,spread_cutoff)
+df=clean_data(raw,spread_cutoff)
 
-# ---- FEATURE BUILD ----
+# ---- FEATURES ----
 def compute_features(df,rolling_n=5,top_n=6,basis="Open Interest"):
     df=df.copy().sort_values("timestamp")
     df["CE_vol_delta"]=df.groupby("CE_strikePrice")["CE_totalTradedVolume"].diff().fillna(0)
     df["PE_vol_delta"]=df.groupby("CE_strikePrice")["PE_totalTradedVolume"].diff().fillna(0)
     df["total_vol"]=df["CE_vol_delta"]+df["PE_vol_delta"]
     df["total_OI"]=df["CE_openInterest"]+df["PE_openInterest"]
-
     metric="total_OI" if basis.startswith("Open") else "total_vol"
     mean_strike=df.groupby("CE_strikePrice")[metric].mean()
     top_strikes=mean_strike.nlargest(top_n)
@@ -99,14 +98,14 @@ st.caption(f"**Top {num_strikes} strikes** cover ≈ {covered_pct}% 
 
 # ---- LOGIC ----
 def detect_regime(row):
-    regime,bias="quiet","neutral"
-    if row["ΔPrice_CE"]*row["ΔOI_CE"]>0 and row["Volume_spike"]>1: regime="trend"
-    elif abs(row["ΔPrice_CE"])<0.05 and abs(row["ΔOI_CE"])<1000: regime="range"
-    elif abs(row["ΔPrice_CE"])>0.2 and row["Volume_spike"]>1.5 and row["ΔIV"]>0: regime="breakout"
-    elif row["ΔPrice_CE"]>0 and row["ΔOI_CE"]<0 and row["ΔIV"]<0: regime="exhaustion"
+    reg,bias="quiet","neutral"
+    if row["ΔPrice_CE"]*row["ΔOI_CE"]>0 and row["Volume_spike"]>1: reg="trend"
+    elif abs(row["ΔPrice_CE"])<0.05 and abs(row["ΔOI_CE"])<1000: reg="range"
+    elif abs(row["ΔPrice_CE"])>0.2 and row["Volume_spike"]>1.5 and row["ΔIV"]>0: reg="breakout"
+    elif row["ΔPrice_CE"]>0 and row["ΔOI_CE"]<0 and row["ΔIV"]<0: reg="exhaustion"
     if row["PCR_OI"]<0.8: bias="bullish"
     elif row["PCR_OI"]>1.2: bias="bearish"
-    return regime,bias
+    return reg,bias
 
 def generate_signal(row):
     if row["regime"]=="trend" and row["bias"]=="bullish": return "BUY_CALL"
@@ -123,10 +122,11 @@ df_feat["signal_numeric"]=df_feat["signal"].map({
     "SELL_STRANGLE":0,"HOLD":0,"EXIT_POSITION":-1
 }).fillna(0)
 
-# ---- STYLERS ----
+# ---- COLOR STYLING ----
 def sig_color(v):
-    c={"BUY_CALL":"#99ff99","BUY_PUT":"#33cc33","SELL_STRANGLE":"#ffcc80",
-       "MOMENTUM_TRADE":"#00b300","EXIT_POSITION":"#ff4d4d","HOLD":"#ffd280"}
+    c={"BUY_CALL":"#99ff99","BUY_PUT":"#33cc33",
+       "SELL_STRANGLE":"#ffcc80","MOMENTUM_TRADE":"#00b300",
+       "EXIT_POSITION":"#ff4d4d","HOLD":"#ffd280"}
     return f"background-color:{c.get(v,'')}"
 def bias_color(v):
     if v=="bullish": return "background-color:#b3ffb3"
@@ -146,7 +146,7 @@ def pcr_text(p):
     return"🐻 Bearish – puts build"
 st.caption(f"**PCR Interpretation:** {pcr_text(lat['PCR_OI'])}")
 
-# ---- TABLES ----
+# ---- DISPLAYS ----
 st.subheader("🧾 Recent Signals")
 st.dataframe(df_feat.tail(10).style.applymap(sig_color,subset=["signal"])
                               .applymap(bias_color,subset=["bias"]),
@@ -156,42 +156,38 @@ st.dataframe(df_feat.style.applymap(sig_color,subset=["signal"])
                           .applymap(bias_color,subset=["bias"]),
              use_container_width=True)
 
-# ---- TIMELINE ----
 st.subheader("🌀 Signal / Bias Timeline")
 sig_chart=alt.Chart(df_feat.reset_index()).mark_circle(size=80).encode(
     x="timestamp:T",
     y=alt.Y("signal_numeric:Q",scale=alt.Scale(domain=[-1.2,1.2]),
             title="Signal (‑1 = Sell, 0 = Hold, +1 = Buy)"),
-    color="bias:N",
-    tooltip=["timestamp","signal","bias","regime"])
+    color="bias:N",tooltip=["timestamp","signal","bias","regime"])
 st.altair_chart(sig_chart,use_container_width=True)
 
-# ---- DEEP PRICE–VOLUME CORRELATION ----
-st.subheader("📊 Deep Price–Volume Correlation Analysis")
-top_vol = st.slider("Select Top Strikes by Avg Volume", 1, 20, 5)
-
-# calc per‑bar volume delta
+# ---- DEEP PRICE–VOLUME CORRELATION ----
+st.subheader("📊 Deep Price–Volume Correlation (Per Strike)")
+top_vol = st.slider("Select Top Strikes by Avg Volume",1,20,5)
 df["total_vol"]=df.groupby("CE_strikePrice")[["CE_totalTradedVolume","PE_totalTradedVolume"]].diff().sum(axis=1).fillna(0)
 avg_vol=df.groupby("CE_strikePrice")["total_vol"].mean().nlargest(top_vol)
-sel=avg_vol.index
-subset=df[df["CE_strikePrice"].isin(sel)].copy()
+sel_strikes=avg_vol.index.tolist()
+subset=df[df["CE_strikePrice"].isin(sel_strikes)].copy()
 
-corr_map={}
-for k,g in subset.groupby("CE_strikePrice"):
-    if g["total_vol"].std()>0 and g["CE_lastPrice"].diff().std()>0:
-        c=np.corrcoef(g["total_vol"],g["CE_lastPrice"].diff())[0,1]
-        corr_map[k]=round(c,3)
-
-subset["ΔPrice"]=subset.groupby("CE_strikePrice")["CE_lastPrice"].diff().fillna(0)
-subset["ΔVol"]=subset.groupby("CE_strikePrice")["total_vol"].diff().fillna(0)
-subset["corr"] = subset["CE_strikePrice"].map(corr_map)
-
-show_cols=["CE_strikePrice","timestamp","CE_lastPrice","total_vol","ΔPrice","ΔVol","corr"]
-subset_display=subset[show_cols].rename(columns={
-    "CE_strikePrice":"Strike","CE_lastPrice":"Price",
-    "total_vol":"Volume","ΔPrice":"Δ Price","ΔVol":"Δ Volume","corr":"Correlation"
-})
-st.dataframe(subset_display,use_container_width=True)
+# ---- make tabs per strike ----
+tabs=st.tabs([f"Strike {int(s)}" for s in sel_strikes])
+for tab, strike in zip(tabs, sel_strikes):
+    g=subset[subset["CE_strikePrice"]==strike].copy()
+    g["ΔPrice"]=g["CE_lastPrice"].diff().fillna(0)
+    g["ΔVol"]=g["total_vol"].diff().fillna(0)
+    corr=np.nan
+    if g["total_vol"].std()>0 and g["ΔPrice"].std()>0:
+        corr=np.corrcoef(g["total_vol"],g["ΔPrice"])[0,1]
+    g["Correlation"]=round(float(corr),3) if not np.isnan(corr) else 0.0
+    cols_show=["timestamp","CE_lastPrice","total_vol","ΔPrice","ΔVol","Correlation"]
+    tab.write(f"**Strike {int(strike)} – Correlation:** {g['Correlation'].iloc[-1]:.3f}")
+    tab.dataframe(g[cols_show].rename(columns={
+        "timestamp":"Timestamp","CE_lastPrice":"Price","total_vol":"Volume",
+        "ΔPrice":"Δ Price","ΔVol":"Δ Volume"
+    }),use_container_width=True)
 
 # ---- DOWNLOAD ----
 st.download_button("⬇️ Download Processed CSV",
